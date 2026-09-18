@@ -2,7 +2,7 @@
 
 Colony-level policy, orchestration, route ownership and planning coordination
 
-**Current agreed concept:** v0.43 • 18 September 2026  
+**Current agreed concept:** v0.44 • 18 September 2026\
 **Project:** RimWorld Advanced Work Planner  
 **Root namespace:** `RimWorldAdvancedWorkPlanner`  
 **Document purpose:** Conceptual specification of colony work-planning policy and orchestration before implementation.  
@@ -86,7 +86,7 @@ Colony-level configurations use the same route-rate unit:
   
 Q(configuration) = sum over planned pawns of Q(route_p)  
   
-This additive configuration score is also used by two-route steal/replacement. Concrete route and affected-pair ordering is defined by the Route Planner canonical `CompareRoutes` / `CompareRoutePairs` contracts and the Work Planner policy comparators in Section 6.4 rather than restated here. The still-open zero-duration-route case must receive an explicit finite comparison rule before implementation.
+This additive configuration score is also used by two-route steal/replacement. Concrete route and affected-pair ordering is defined by the Route Planner canonical `CompareRoutes` / `CompareRoutePairs` contracts and the Work Planner policy comparators in Section 6.4 rather than restated here. Route Planner defines the finite zero-duration rule canonically as `Q = TotalReward / max(TotalDuration, OnePlannerTimeQuantum)`, so zero-duration route comparison and regret subtraction never use IEEE infinity or NaN.
 
 # 4. Route Planner service boundary
 
@@ -326,7 +326,7 @@ BuildPolicyRoute is a Work-Planner-only construct-or-augment helper.
 
 **Ordinary mode — `requiredItems = {}`.**
 
-If the pawn has no route, use the existing Primary-first BuildRoute pipeline: Primary BuildRoute first. A partial created by that BuildRoute has already received the enclosing operation's maximum-feasible partial treatment; a following Backup `ExpandRoute` does **not** by itself trigger another `MaximizePartial`. If no Primary route can be constructed, coordinated planning marks relaxation as appropriate and Backup becomes the fallback BuildRoute pool.
+If the pawn has no route, use the existing Primary-first BuildRoute pipeline: Primary BuildRoute first. When that Primary BuildRoute succeeds, its non-empty result becomes the baseline for one ordinary Backup `ExpandRoute(required = {})`; this following Backup stage has zero positive-shift authority and does not by itself trigger `MaximizePartial`. (Ordinary no-required Primary BuildRoute cannot create a partial, but the no-extra-normalization rule remains the common public-operation boundary rule.) If no Primary route can be constructed, coordinated planning marks relaxation as appropriate and Backup instead becomes the fallback BuildRoute pool. A failed fallback leaves the pawn at ordinary NoRoute/Idle. Therefore Backup augments a successfully constructed Primary-backed route and acts as the sequential from-scratch fallback only when Primary construction fails; these are not competing numeric alternatives.
 
 If the pawn already has a route, BuildPolicyRoute operates from the normalized-baseline child prepared once for this set of alternatives before candidate branching, and first inspects that complete normalized route's `HasPlannedPrimary` state:
 
@@ -580,7 +580,18 @@ Choose the winning anchor-targeted candidate context, destroy all competing cand
 
 Before a winning pawn-decision child context is merged/promoted into its Work-Planner parent for the first time, Work Planner runs one sequential immediate-steal pass for that pawn's complete effective route. This applies regardless of whether the winning decision created a route from scratch, augmented an existing route or left an existing non-empty route otherwise unchanged. Route Planner internal branch merges are exempt and never trigger this boundary.
 
-The victim set is every route owned by another pawn whose assignments are authoritative/reserved in the effective parent state and therefore unavailable to the receiver. ColonyStateContext routes and accepted ancestor-context routes can be victims; unresolved speculative sibling alternatives cannot. Receiver and victim must be different pawns.
+The victim set is every **non-empty** route owned by another pawn whose assignments are authoritative/reserved in the effective parent state and therefore unavailable to the receiver, provided that route contains at least one v1 removal-safe step eligible for consideration. ColonyStateContext routes and accepted ancestor-context routes can be victims; unresolved speculative sibling alternatives, transient empty routes and NoRoute states cannot. Receiver and victim must be different pawns.
+
+For every `TrySteal` call, Work Planner derives each affected pawn's fixed preservation horizon from the call-entry effective route rather than carrying an earlier operation's used-shift result:
+
+```text
+TryStealHorizon(route) = max(
+    session BaseHorizon,
+    StartTime + route.TotalDuration
+        + TerminalTravel(route, HorizonEndPosition))
+```
+
+The formula freezes the boundary already occupied by the current legal route, including a route normalized with positive shift and therefore excluded from PlanningPawns, without converting unused MaxTimeShift into generic steal budget. A receiver/victim variant may reuse time saved by its own rearrangement but must fit the independently frozen boundary for that route. Each later sequential victim call derives fresh limits from the then-current effective routes and does not read an earlier operation's `UsedTimeShift` metadata.
 
 Work Planner visits eligible victims once in one stable deterministic route/list order. That order carries no policy priority and v1 does not optimize it, but the greedy result may depend on it because every accepted steal changes the effective baseline seen by later victims. For each victim Work Planner calls Route Planner `TrySteal` directly against the still-live winning decision context. TrySteal performs only transfer/replacement of planned assigned work; it does not repair the victim or consume additional unassigned work. If an improvement wins, Route Planner merges it back into the supplied winning context, and the next victim sees that updated effective state. There is no comparison of different victims from a common baseline, no victim-order permutation search and no repeat-to-convergence pass.
 
@@ -776,7 +787,7 @@ v1 should not maintain a persistent cache of arbitrary checked job combinations.
 
 - UI Priority is the base continuous-work Reward/s; CompletionTravelBonusCells is the separate completion-bias setting. Priority expresses value, not urgency.
 
-- Q(route) is Reward/s. Positive Reward at zero marginal elapsed time is a strict improvement. Concrete route/candidate comparison ordering is centralized in the Route Planner `CompareRoutes` contract and Work Planner Section 6.4 rather than restated by individual algorithms.
+- Q(route) is the finite Reward/s score `TotalReward / max(TotalDuration, OnePlannerTimeQuantum)`. Provider durations are integral multiples of that canonical quantum, so the floor changes only exactly zero-duration routes. A zero-duration/zero-Reward route has Q=0; positive Reward at zero marginal elapsed time is a strict improvement; regret arithmetic never uses IEEE infinity/NaN. Concrete route/candidate comparison ordering is centralized in the Route Planner `CompareRoutes` contract and Work Planner Section 6.4 rather than restated by individual algorithms.
 
 - Assigned/reserved ownership is broader than PlannedRoute membership. Planned assigned work is represented by PlannedSteps and may participate in route-preserving redistribution; executing reservations are assigned but outside PlannedRoute, outside the effective unassigned pool and unavailable to Primary free-work matching, normal candidate snapshots and TrySteal until the event/integration layer releases/completes/invalidates them.
 
@@ -849,8 +860,6 @@ v1 should not maintain a persistent cache of arbitrary checked job combinations.
 
 - Performance budget and profiling thresholds for travel-cache size, route memoization and matching recomputation.
 
-- If an all-zero-duration positive-Reward route must participate directly in regret arithmetic, use an explicit finite implementation encoding/special comparison path rather than IEEE infinity; ordinary route improvement is already defined because positive Reward at zero marginal elapsed time is a strict improvement, and immediate zero-time work can execute before an immediate replanning event.
-
 - Concrete event-to-maintenance mapping for RimWorld state changes that affect route cached metrics or validity; architecture is event-driven, but the exact event set belongs to integration design.
 
 - Pawn-specific assignment-invalidation events where the WorkItem remains globally valid but the current pawn loses policy/capability/area/access eligibility: define event-layer forced-release semantics, return-to-pool behavior, protection handling and repair trigger.
@@ -922,7 +931,7 @@ The following points are deliberate v1 decisions. Routine design review should n
 - Work Planner must not duplicate Route Planner internal algorithms. It documents invocation conditions, policy-correct inputs, operation outcomes and higher-level handling only. It may rely on Route Planner result metadata and restate externally observable facts only when Work Planner itself branches on them; detailed route-search/compression mechanics remain authoritative exclusively in the Route Planner design.
 
 
-- Immediate-steal victim membership is defined by assignment visibility in the parent/effective state: consider every **other-pawn** route whose assignments were reserved/unavailable to the selected receiver. ColonyStateContext and accepted ancestor routes can be victims; unresolved speculative sibling alternatives are not authoritative victims. `receiverWorker == victimWorker` is invalid.
+- Immediate-steal victim membership is defined by assignment visibility in the parent/effective state: consider every **non-empty other-pawn** route whose assignments were reserved/unavailable to the selected receiver and that contains at least one v1 removal-safe candidate step. ColonyStateContext and accepted ancestor routes can be victims; unresolved speculative sibling alternatives and transient empty/no-route states are not authoritative victims. `receiverWorker == victimWorker` is invalid. For each call, derive each route's fixed preservation horizon as the greater of BaseHorizon and its current absolute required end, without adding unused MaxTimeShift; this freezes an already-authorized baseline without carrying prior used-shift metadata or granting generic shift budget.
 
 - Execution-boundary guardrail: never represent currently executing work as a leading/locked step inside PlannedRoute merely to support steal or horizon calculations. Executing work is outside the route but remains assigned/reserved and unavailable to the effective unassigned pool, Primary matching, normal candidate snapshots and `TrySteal`. The event/execution integration layer supplies the already-correct route-start context: when execution precedes the still-planned route, `RouteStartTime`/`InitialPosition` already predict the end time/result position of that executing work. The concrete reservation/transition mechanics are intentionally not mirrored here.
 

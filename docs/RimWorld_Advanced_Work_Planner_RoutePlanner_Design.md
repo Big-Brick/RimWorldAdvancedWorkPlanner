@@ -2,7 +2,7 @@
 
 Generic route construction, travel-cost abstraction and bounded cross-route optimization with policy-eligibility callbacks but no direct Primary/Backup semantics
 
-**Current agreed concept:** v0.43 • 18 September 2026  
+**Current agreed concept:** v0.44 • 18 September 2026\
 **Project:** RimWorld Advanced Work Planner  
 **Root namespace:** `RimWorldAdvancedWorkPlanner`  
 **Document purpose:** Specification of generic route construction, expansion, compression, travel-cost abstraction and bounded cross-route steal/replacement optimization  
@@ -205,7 +205,8 @@ Long-lived caching belongs primarily inside ITravelProvider because path calcula
 
 For every worker/work-item evaluation, the planner obtains full or partial Reward from IRewardProvider. It does not calculate UI Priority, quality models, completion-travel bonus or Primary/Backup weighting itself.
 
-Q(route) = TotalReward(route) / TotalDuration(route)  
+ScoreDuration(route) = max(TotalDuration(route), OnePlannerTimeQuantum)\
+Q(route) = TotalReward(route) / ScoreDuration(route)\
   
 TotalDuration = WorkDuration + WalkingDuration  
 WalkingDuration = sum of planned route travel legs  
@@ -219,7 +220,9 @@ TotalDuration(empty route) = 0
 
 For an operation-local empty route snapshot, `EndPosition = InitialPosition` for that operation. This makes terminal-travel feasibility well-defined when removal/steal eliminates the last planned step. Empty route snapshots are valid transient inputs/results for operations that preserve or repair existing routes; persistence/Idle semantics belong to Work Planner.
 
-GetWorkTime(worker) = 0 is valid. If a candidate mutation adds positive Reward with zero additional elapsed duration, it is a strict improvement and is accepted without dividing by zero. A non-empty all-zero-duration route represents immediate positive work; only arithmetic such as regret subtraction needs an explicit finite implementation encoding.
+`OnePlannerTimeQuantum` is the canonical smallest positive duration unit used by planner inputs (one simulation tick in the v1 simulator). Travel and work durations are non-negative integral multiples of that quantum after provider conversion, so the denominator substitution changes only an exactly zero-duration route. Consequently a zero-duration/zero-Reward route has `Q = 0`, a positive-Reward zero-duration route has the finite score `TotalReward / OnePlannerTimeQuantum`, and ordinary finite arithmetic — including anchor-regret subtraction — is well-defined. Multiple instantaneous items accumulate Reward normally rather than producing IEEE infinity or NaN.
+
+GetWorkTime(worker) = 0 is valid. If a candidate mutation adds positive Reward with zero additional elapsed duration, it is a strict improvement under the finite formula above.
 
 Walking lowers Q through route elapsed time. Generic route ordering is centralized here rather than restated by individual algorithms.
 
@@ -301,7 +304,7 @@ CandidateListId // immutable optional-candidate snapshot in context infrastructu
 RequiredListId // immutable required-item snapshot in context infrastructure  
 InitialPosition  
 StartTime // absolute operation context  
-Horizon // base absolute horizon  
+BaseHorizon // unshifted base absolute horizon\
 HorizonEndPosition  
 MaxTimeShift  
 }
@@ -388,7 +391,7 @@ Among routes containing every RequiredJob fully completed, choose minimum requir
 ## 7.2 Incomplete RequiredJobs fallback
 
 k0 = maximum fully completed RequiredJobs that still reach HorizonEndPosition inside base Horizon  
-kMax = maximum fully completed RequiredJobs that still reach HorizonEndPosition inside Horizon + MaxTimeShift
+kMax = maximum fully completed RequiredJobs that still reach HorizonEndPosition inside BaseHorizon + MaxTimeShift
 
 If kMax \> k0, shift may be used because it preserves more RequiredJobs. Choose a kMax route by minimum necessary requiredShift including terminal travel, then use `CompareRoutes`. The shifted work sequence ends immediately after a fully completed work item; shifted time may not be spent travelling to or partially executing another required item except for terminal travel. Because kMax \> k0, this branch necessarily represents at least one fully completed RequiredJob and therefore produces a successful required baseline.
 
@@ -404,7 +407,7 @@ Any successful incomplete baseline returns `RequiredSetSatisfied = false`, `Comp
 
 `RequiredSetSatisfied` does not decide whether optional work may be added. After **any** successful required baseline — complete or incomplete, zero-shift or positive-shift — BuildRoute may run ordinary full-work optional augmentation through the private/internal optional-augmentation helper defined in Section 11. This is an internal phase of the same `BuildRoute` call, **not** a nested public `ExpandRoute` invocation.
 
-Within one BuildRoute call, the required stage may establish a positive `requiredShift`. The subsequent internal optional-augmentation phase may then use the call-local limit `Horizon + requiredShift`, with no authority to increase that limit further. Optional work may use capacity already available inside that call-local limit, including zero-duration or geometry-neutral improvements, but it may not introduce additional shift merely because RequiredJobs justified the required-stage extension.
+Within one BuildRoute call, the required stage may establish a positive `requiredShift`. The subsequent internal optional-augmentation phase may then use the call-local limit `BaseHorizon + requiredShift`, with no authority to increase that limit further. Optional work may use capacity already available inside that call-local limit, including zero-duration or geometry-neutral improvements, but it may not introduce additional shift merely because RequiredJobs justified the required-stage extension.
 
 This is the shift invariant inside Route Planner: positive shift may be introduced only by an explicitly protected completion boundary. How a later, separate public Route Planner call chooses its own Horizon and MaxTimeShift is entirely the caller's responsibility.
 
@@ -431,9 +434,9 @@ For RequiredJobs, v1 exhaustively enumerates all policy-valid ordered subsets/pe
 ```text
 BuildRequiredRouteExact(requiredJobs):
     baseFullCandidates = SearchAllOrderedRequiredSubsets(
-        requiredJobs, Horizon, HorizonEndPosition)
+        requiredJobs, BaseHorizon, HorizonEndPosition)
     maxFullCandidates = SearchAllOrderedRequiredSubsets(
-        requiredJobs, Horizon + MaxTimeShift, HorizonEndPosition)
+        requiredJobs, BaseHorizon + MaxTimeShift, HorizonEndPosition)
 
     if maxFullCandidates contains a route completing all RequiredJobs:
         best = all-complete candidate with:
@@ -504,7 +507,7 @@ if required is Failure:
     return Failure
 
 route = required.Route
-optionalAugmentationHorizon = Horizon + required.RequiredShift
+optionalAugmentationHorizon = BaseHorizon + required.RequiredShift
 
 if CandidateListId is non-empty:
     route = AugmentRouteWithOptionalCandidates(
@@ -787,14 +790,14 @@ receiverWorker
 receiverRoute  
 receiverInitialPosition  
 receiverStartTime  
-receiverHorizon // caller-supplied fixed horizon constraint  
+receiverHorizon // current-baseline preservation limit derived below\
 receiverHorizonEndPosition  
   
 victimWorker  
 victimRoute // complete context-effective future route; contains no executing work  
 victimInitialPosition  
 victimStartTime  
-victimHorizon // caller-supplied fixed horizon constraint  
+victimHorizon // current-baseline preservation limit derived below\
 victimHorizonEndPosition  
 
 Preconditions:
@@ -804,7 +807,17 @@ Preconditions:
 - both routes are already horizon-valid under their supplied fixed horizons;
 - the optimizer has no MaxTimeShift authority and cannot move either horizon.
 
-Work Planner constructs the immediate-steal victim set from other-pawn routes whose assignments were reserved/unavailable to the receiver. Route Planner does not discover victim membership itself. The event/integration layer guarantees through ColonyStateContext that executing work is absent and that each operation start context is current. How those guarantees and complete-route versions are represented is outside this document.
+For each route at the start of a `TrySteal` call, Work Planner derives the fixed preservation limit without reading or carrying an earlier operation's `UsedTimeShift` metadata:
+
+```text
+TryStealHorizon(route) = max(
+    session BaseHorizon,
+    StartTime + RequiredElapsed(route, HorizonEndPosition))
+```
+
+The second term freezes the current effective route's already-authorized completion boundary; it does not grant new completion allowance. Its legality comes from the normal-session precondition for inherited routes or from the accepted operation that produced the current route, not from `TrySteal`. Receiver and victim variants must fit their independently frozen limits. Thus steal may reuse time saved by its own route rearrangement, but it cannot extend either route later than the boundary occupied by that route at call entry (or later than BaseHorizon when the entry route already fits the base). A later sequential steal call derives fresh preservation limits from the then-current effective routes; it still does not inherit operation-local shift metadata.
+
+Work Planner constructs the immediate-steal victim set from **non-empty** other-pawn routes whose assignments were reserved/unavailable to the receiver and that contain at least one v1 removal-safe step eligible for consideration. Route Planner does not discover victim membership itself. Transient empty/no-route states and routes with no removal-safe candidate are not victims. The event/integration layer guarantees through ColonyStateContext that executing work is absent and that each operation start context is current. How those guarantees and complete-route versions are represented is outside this document.
 
 ## 15.2 Steal candidates and MustRemainAssigned
 
@@ -954,7 +967,7 @@ CompressRoute is intentionally simpler than ordinary exact RequiredJobs search: 
 
 - Construction request timestamps/horizons may be absolute; PlannedRoute stores local durations/snapshot metrics rather than cumulative absolute per-step timestamps.
 
-- Q(route) is Reward/s; Q(empty) = 0. Positive Reward at zero marginal duration is a strict improvement. Generic alternative ordering is defined only by the canonical comparators in Section 4.1; higher-level callers may add policy-specific tie-breaks after an `Equivalent` result.
+- Q(route) is the finite `TotalReward / max(TotalDuration, OnePlannerTimeQuantum)` rate; Q(empty) = 0. Provider durations are integral multiples of the canonical quantum, so only exactly zero duration uses the denominator floor. Positive Reward at zero marginal duration is a strict improvement, zero-duration regret arithmetic is finite, and IEEE infinity/NaN is never used. Generic alternative ordering is defined only by the canonical comparators in Section 4.1; higher-level callers may add policy-specific tie-breaks after an `Equivalent` result.
 
 - Reserved terminal travel to HorizonEndPosition participates in fit checks but intentionally is excluded from route Q/WalkingDuration.
 
@@ -1012,8 +1025,6 @@ CompressRoute is intentionally simpler than ordinary exact RequiredJobs search: 
 
 - Performance limits for candidate set size before work-item clustering becomes necessary.
 
-- Exact Q/comparison semantics for a non-empty route whose total elapsed duration is exactly zero, including how multiple positive-Reward zero-marginal-time work items should be accumulated without letting an infinite rate block ordinary positive-duration work.
-
 - Concrete integration event mapping for external pawn/path/reward changes is deferred outside Route Planner; the core contract merely assumes supplied route snapshots are current.
 
 - Pawn-specific invalid-assignment handling for still-globally-valid WorkItems is explicitly deferred to that integration/event layer rather than another v1 Route Planner mutation contract.
@@ -1068,7 +1079,7 @@ The following are deliberate v1 decisions and should not be reopened in routine 
 
 - Known v1 limitation: repeated repair of an inherited-required recovery route may over-preserve an optionally added last Primary because generic eligibility does not store route provenance. This is intentionally accepted as a rare safe/suboptimal case. Review guardrail: MustRemainAssigned allows a protected step to move atomically only when ordinary CanSteal/local-backing rules permit the resulting state; wording that a selected/protected anchor “may move” is intentionally conditional and does not promise universal transferability.
 
-- Immediate-steal victim membership is a Work Planner assignment-visibility decision: Route Planner only receives a specific other-pawn victim. `receiverWorker == victimWorker` is invalid. ColonyStateContext/ancestor effective routes can be victims when their assignments were reserved/unavailable to the receiver; unresolved speculative sibling alternatives are not automatically victims.
+- Immediate-steal victim membership is a Work Planner assignment-visibility decision: Route Planner only receives a specific non-empty other-pawn victim with at least one removal-safe candidate step. `receiverWorker == victimWorker` is invalid. ColonyStateContext/ancestor effective routes can be victims when their assignments were reserved/unavailable to the receiver; unresolved speculative sibling alternatives and transient empty/no-route states are not victims. Work Planner derives each call's receiver/victim preservation horizon from the greater of BaseHorizon and that route's current absolute required end, with no cap inferred from unused MaxTimeShift. This freezes an already-authorized baseline boundary without carrying earlier operation result metadata or granting new shift.
 
 - Execution-boundary guardrail: do not reintroduce an executing/locked prefix inside `PlannedRoute`. Executing work is outside the route but remains assigned/reserved and absent from the effective unassigned pool, normal CandidateLists and steal victims until the event/integration layer explicitly completes, releases or invalidates that ownership. Route Planner receives only the still-planned route plus its already-correct start context; the future event/execution integration design owns the concrete reservation/transition mechanics.
 
@@ -1079,4 +1090,3 @@ The following are deliberate v1 decisions and should not be reopened in routine 
 - Comparison-policy guardrail: generic route and affected-pair ordering is defined only by `CompareRoutes` / `CompareRoutePairs` in Section 4.1. Algorithm sections should reference those comparators after their operation-specific higher-priority criteria instead of duplicating Q/walking/tie-break sequences.
 
 - Steal-normalization guardrail: `TrySteal` evaluates and returns the affected route pair without implicit partial normalization. Do not reintroduce a requirement that every accepted steal immediately triggers `MaximizePartial`; later normalization belongs to the next Work Planner existing-route decision boundary, the final session pass, or explicit maintenance.
-
