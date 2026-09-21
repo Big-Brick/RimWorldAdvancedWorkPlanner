@@ -850,7 +850,7 @@ v1 should not maintain a persistent cache of arbitrary checked job combinations.
 
 # 20. Open design questions
 
-- **Critical pre-implementation decision — zero-duration work.** Every non-empty route and every routable WorkItem in the current design has strictly positive work/total duration. Before implementation of the core planner/simulator begins, integration must either forbid/normalize zero-duration work before it reaches Work/Route Planner, or the design must separately define zero-duration assignment, reward/scoring, route/configuration comparison, anchor regret, RequiredJobs, steal and execution/immediate-replanning semantics. Until that decision is made, zero-duration WorkItems are invalid planner input; implementations must not silently invent a quantum/epsilon, use infinity/NaN, coerce zero to one tick or add local comparator exceptions.
+- **Critical pre-implementation decision — zero-duration work.** Every non-empty route and every routable WorkItem in the current design has strictly positive work/total duration. Before implementation of the core planner/simulator begins, integration must either forbid/normalize zero-duration work before it reaches Work/Route Planner, or the design must separately define zero-duration assignment, reward/scoring, route/configuration comparison, anchor regret, RequiredJobs, steal and execution/immediate-replanning semantics. Until that decision is made, zero-duration WorkItems are invalid planner input and implementations must not invent local zero-duration behavior.
 
 - Concrete expected-result functions q for each skill-sensitive RimWorld work family.
 
@@ -878,7 +878,7 @@ v1 should not maintain a persistent cache of arbitrary checked job combinations.
 
 The following points are deliberate v1 decisions. Routine design review should not reopen them without new gameplay evidence, an implementation contradiction or a concrete failure mode.
 
-- **Critical scope guardrail — zero-duration routes.** All Work Planner policy, configuration scoring, anchor regret, temporal orchestration, steal coordination and related invariants currently specified in this document apply only to non-empty routes with `TotalDuration > 0` built from strictly positive-duration WorkItems. Routine review must not report missing zero-duration behavior as a contradiction inside that bounded scope or add a local quantum/infinity/epsilon workaround. This is nevertheless a hard blocker before core planner/simulator implementation: Section 20's integration prohibition/normalization versus separately designed zero-duration semantics decision must be resolved first.
+- **Critical scope guardrail — zero-duration routes.** All Work Planner policy, configuration scoring, anchor regret, temporal orchestration, steal coordination and related invariants currently specified in this document apply only to non-empty routes with `TotalDuration > 0` built from strictly positive-duration WorkItems. Routine review must not report missing zero-duration behavior as a contradiction inside that bounded scope or add a local workaround. This is nevertheless a hard blocker before core planner/simulator implementation: Section 20's integration prohibition/normalization versus separately designed zero-duration semantics decision must be resolved first.
 
 - Inherited-required rebuild is recovery and does not require Primary backing. Primary augmentation remains Q-improvement-only and is attempted before Backup.
 
