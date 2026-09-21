@@ -43,7 +43,7 @@ GetWorkTime(worker) // signed duration
 SupportsPartialExecution  
 }
 
-StartPosition is where execution begins. EndPosition() is valid only for a fixed resulting position; duration-dependent work uses EndPosition(worker, workDuration). GetWorkTime(worker) is full elapsed execution duration after arrival; negative means this worker cannot execute the item, zero is valid for instantaneous work. SupportsPartialExecution is true only when the integration layer can persist meaningful partial progress and provide correct partial Reward/result-position semantics.
+StartPosition is where execution begins. EndPosition() is valid only for a fixed resulting position; duration-dependent work uses EndPosition(worker, workDuration). GetWorkTime(worker) is full elapsed execution duration after arrival; negative means this worker cannot execute the item and a strictly positive duration is required by the current planner contract. Zero-duration WorkItems/routes are outside the semantics specified by this document and must not be supplied to the v1 core until the critical pre-implementation decision in Sections 19–20 is resolved. SupportsPartialExecution is true only when the integration layer can persist meaningful partial progress and provide correct partial Reward/result-position semantics.
 
 Every IWorkItem has stable identity for the lifetime of its planning/assignment existence. Equality/hashing used by assignment ownership, route membership, matching indices, search-state bookkeeping and caches use that identity rather than mutable progress or route metadata.
 
@@ -65,7 +65,7 @@ PlannedWorkDuration and CompletesWorkItem are cached execution estimates in the 
 
 MustRemainAssigned is a route-maintenance/optimization invariant supplied by higher-level planning. Within route-preserving operations the item may move atomically but may not be dropped. If the caller performs a full structural discard/rebuild, surviving protected work may be carried into RequiredJobs according to Work Planner semantics; Route Planner does not decide why the protection exists and does not infer MustRemainAssigned merely because an item appears in RequiredJobs. Any protection that survives such a rebuild is higher-level Work Planner bookkeeping on the rebuilt result.
 
-For partial execution, the current PlannedWorkDuration is an absolute work-time budget, not a completion fraction. If an explicitly handled state change alters work speed/remaining work, event-driven maintenance may update PlannedWorkDuration, CompletesWorkItem and dependent reward/result-position metrics. Such refresh must not silently convert a previously valid full step into an unsupported or unplanned partial step; if the route constraints no longer support the step, the caller repairs or invalidates the route. Zero-work items are instantaneous and never partial. v1 planner/simulator assumes elementary WorkItems; complex interaction-cell selection, clustering/packages and moving-work decomposition remain deferred integration concerns.
+For partial execution, the current PlannedWorkDuration is an absolute positive work-time budget, not a completion fraction. If an explicitly handled state change alters work speed/remaining work, event-driven maintenance may update PlannedWorkDuration, CompletesWorkItem and dependent reward/result-position metrics. Such refresh must not silently convert a previously valid full step into an unsupported or unplanned partial step; if the route constraints no longer support the step, the caller repairs or invalidates the route. v1 planner/simulator assumes elementary positive-duration WorkItems; zero-duration work, complex interaction-cell selection, clustering/packages and moving-work decomposition remain deferred integration concerns.
 
 Whenever a Route Planner operation changes a partial step's `PlannedWorkDuration`, that mutation atomically refreshes every route-snapshot value whose meaning depends on the duration. At minimum this includes the step's `PlannedReward`, `CompletesWorkItem` and resulting position through `EndPosition(worker, workDuration)`; any affected following `TravelFromPrevious`; route `EndPosition` when affected; WorkDuration, WalkingDuration, TotalDuration, TotalReward and Score/Q aggregates; and terminal-travel feasibility. Unaffected steps and unrelated local metrics are not defensively reevaluated. This contract applies both when `MaximizePartial` increases a budget and when compression reduces one.
 
@@ -205,8 +205,7 @@ Long-lived caching belongs primarily inside ITravelProvider because path calcula
 
 For every worker/work-item evaluation, the planner obtains full or partial Reward from IRewardProvider. It does not calculate UI Priority, quality models, completion-travel bonus or Primary/Backup weighting itself.
 
-ScoreDuration(route) = max(TotalDuration(route), OnePlannerTimeQuantum)\
-Q(route) = TotalReward(route) / ScoreDuration(route)\
+Q(route) = TotalReward(route) / TotalDuration(route)\
   
 TotalDuration = WorkDuration + WalkingDuration  
 WalkingDuration = sum of planned route travel legs  
@@ -220,9 +219,7 @@ TotalDuration(empty route) = 0
 
 For an operation-local empty route snapshot, `EndPosition = InitialPosition` for that operation. This makes terminal-travel feasibility well-defined when removal/steal eliminates the last planned step. Empty route snapshots are valid transient inputs/results for operations that preserve or repair existing routes; persistence/Idle semantics belong to Work Planner.
 
-`OnePlannerTimeQuantum` is the canonical smallest positive duration unit used by planner inputs (one simulation tick in the v1 simulator). Travel and work durations are non-negative integral multiples of that quantum after provider conversion, so the denominator substitution changes only an exactly zero-duration route. Consequently a zero-duration/zero-Reward route has `Q = 0`, a positive-Reward zero-duration route has the finite score `TotalReward / OnePlannerTimeQuantum`, and ordinary finite arithmetic — including anchor-regret subtraction — is well-defined. Multiple instantaneous items accumulate Reward normally rather than producing IEEE infinity or NaN.
-
-GetWorkTime(worker) = 0 is valid. If a candidate mutation adds positive Reward with zero additional elapsed duration, it is a strict improvement under the finite formula above.
+Every non-empty PlannedRoute supported by the current design has `TotalDuration > 0`, because every routable WorkItem has strictly positive work duration. `Q(empty route) = 0` remains an explicit comparison-only convention for transient empty/Idle state; it does not imply support for a non-empty zero-duration route. The scoring, comparison, regret, RequiredJobs, steal and execution semantics of zero-duration WorkItems/routes are deliberately unspecified until the critical pre-implementation decision in Sections 19–20 is resolved.
 
 Walking lowers Q through route elapsed time. Generic route ordering is centralized here rather than restated by individual algorithms.
 
@@ -384,7 +381,7 @@ For non-empty RequiredJobs, BuildRoute first tries to complete the whole set. If
 
 ## 7.1 Exact complete-RequiredJobs mode
 
-Search every policy-valid permutation of the complete RequiredJobs set. Reject a mutation when CanAssign fails, GetWorkTime(worker) \< 0, or required travel is unreachable. A complete configuration may use shift only as needed to finish RequiredJobs and still reach HorizonEndPosition, never to create a partial tail. Exact-search pruning may use non-negative shortest-path/travel assumptions and the elementary IWorkItem movement contract.
+Search every policy-valid permutation of the complete RequiredJobs set. Reject a mutation when CanAssign fails, GetWorkTime(worker) \<= 0, or required travel is unreachable. A complete configuration may use shift only as needed to finish RequiredJobs and still reach HorizonEndPosition, never to create a partial tail. Exact-search pruning may use non-negative shortest-path/travel assumptions and the elementary IWorkItem movement contract.
 
 Among routes containing every RequiredJob fully completed, choose minimum requiredShift; among equal-shift alternatives use `CompareRoutes`. If all required work fits the base Horizon, requiredShift is zero. This selected required configuration is the required baseline used by BuildRoute's optional-expansion rule in Section 7.3.
 
@@ -407,7 +404,7 @@ Any successful incomplete baseline returns `RequiredSetSatisfied = false`, `Comp
 
 `RequiredSetSatisfied` does not decide whether optional work may be added. After **any** successful required baseline — complete or incomplete, zero-shift or positive-shift — BuildRoute may run ordinary full-work optional augmentation through the private/internal optional-augmentation helper defined in Section 11. This is an internal phase of the same `BuildRoute` call, **not** a nested public `ExpandRoute` invocation.
 
-Within one BuildRoute call, the required stage may establish a positive `requiredShift`. The subsequent internal optional-augmentation phase may then use the call-local limit `BaseHorizon + requiredShift`, with no authority to increase that limit further. Optional work may use capacity already available inside that call-local limit, including zero-duration or geometry-neutral improvements, but it may not introduce additional shift merely because RequiredJobs justified the required-stage extension.
+Within one BuildRoute call, the required stage may establish a positive `requiredShift`. The subsequent internal optional-augmentation phase may then use the call-local limit `BaseHorizon + requiredShift`, with no authority to increase that limit further. Optional work may use capacity already available inside that call-local limit, including geometry-neutral improvements, but it may not introduce additional shift merely because RequiredJobs justified the required-stage extension.
 
 This is the shift invariant inside Route Planner: positive shift may be introduced only by an explicitly protected completion boundary. How a later, separate public Route Planner call chooses its own Horizon and MaxTimeShift is entirely the caller's responsibility.
 
@@ -543,33 +540,29 @@ Best-local supplies no RequiredJobs. When the pawn has no route, Work Planner in
 
 ## 10.1 Seed 1 - best intrinsic work rate
 
-F0 = { j \| a single-job route for j passes CanAssign, GetWorkTime(worker) \>= 0, is reachable, fully completes, and can still reach HorizonEndPosition inside the base horizon }  
-Fzero = { j in F0 \| GetWorkTime(worker) == 0 }  
-Fpositive = { j in F0 \| GetWorkTime(worker) \> 0 }  
+F = { j \| a single-job route for j passes CanAssign, GetWorkTime(worker) \> 0, is reachable, fully completes, and can still reach HorizonEndPosition inside the base horizon }\
   
-Every item in Fzero becomes an additional zero-work seed. These seeds are added independently of the two ordinary heuristics below so instantaneous work is not hidden by duration-based ranking.  
-  
-If Fpositive is non-empty:  
-j1 = argmax\_{j in Fpositive} R_j / WorkTime_j  
+If F is non-empty:\
+j1 = argmax\_{j in F} R_j / WorkTime_j\
 else:  
 j1 = none  
   
-If F0 is empty, BuildRoute returns `Failure`; there is no construction TimeShift or partial fallback.
+If F is empty, BuildRoute returns `Failure`; there is no construction TimeShift or partial fallback.
 
-Seed 1 ignores initial walking in its primary score. If primary values tie, prefer less initial walking. Zero-work items never enter this division; they are already represented by their dedicated additional seeds.
+Seed 1 ignores initial walking in its primary score. If primary values tie, prefer less initial walking.
 
 ## 10.2 Seed 2 - best initial route rate
 
-If Fpositive is non-empty:  
-j2 = argmax\_{j in Fpositive} R_j / (TravelTime(InitialPosition, Start_j) + WorkTime_j)  
+If F is non-empty:\
+j2 = argmax\_{j in F} R_j / (TravelTime(InitialPosition, Start_j) + WorkTime_j)\
 else:  
 j2 = none
 
-Seed 2 accounts for current position. If primary values tie, prefer less walking. If j1 and j2 are the same item, create only one ordinary seed. Zero-work items are still added separately even when one would also be attractive by initial route rate; this avoids both divide-by-zero and heuristic starvation of instantaneous work.
+Seed 2 accounts for current position. If primary values tie, prefer less walking. If j1 and j2 are the same item, create only one ordinary seed.
 
 ## 10.3 Seed expansion and selection
 
-Expand every seed independently through the Section 11 private optional-augmentation helper under the fixed zero-shift base Horizon: up to two ordinary positive-work heuristic seeds plus every schedulable zero-work seed. Independently expanded seeds represent alternative assignment states and therefore use sibling internal child contexts under the BuildRoute operation context. Because seeds are created only from schedulable single-job routes, an unschedulable high-scoring job cannot hide a lower-scoring schedulable candidate. After comparison, losing seed contexts are released and the selected seed branch is merged back into the BuildRoute operation context. Return `Success` with the best expanded seed according to `CompareRoutes`; if the alternatives are Equivalent, either may be kept.
+Expand every seed independently through the Section 11 private optional-augmentation helper under the fixed zero-shift base Horizon: up to two positive-work heuristic seeds. Independently expanded seeds represent alternative assignment states and therefore use sibling internal child contexts under the BuildRoute operation context. Because seeds are created only from schedulable single-job routes, an unschedulable high-scoring job cannot hide a lower-scoring schedulable candidate. After comparison, losing seed contexts are released and the selected seed branch is merged back into the BuildRoute operation context. Return `Success` with the best expanded seed according to `CompareRoutes`; if the alternatives are Equivalent, either may be kept.
 
 ## 10.4 No construction TimeShift or optional partial fallback
 
@@ -581,7 +574,7 @@ For the existing-route ExpandRoute path, RequiredListId is empty. ExpandRoute us
 
 `AugmentRouteWithOptionalCandidates` is a private/internal Route Planner helper used by both `BuildRoute` and the public `ExpandRoute`. It performs only ordinary full-work greedy augmentation inside a horizon limit already established by its caller. It has no RequiredJob stage and no authority to introduce additional TimeShift. Calling this helper is not a separate public Route Planner operation.
 
-Given a current policy-valid route and one candidate X resolved from the operation CandidateListId, first require Eligibility.CanAssign(worker, route, X). Then obtain `workTime = X.GetWorkTime(worker)`; if `workTime < 0`, reject X. Test X at every insertion position, including before the first and after the last existing step. Any layout whose newly required travel leg returns a negative duration is unreachable and is rejected. `CanAssign` does not replace execution-time or path-feasibility validation.
+Given a current policy-valid route and one candidate X resolved from the operation CandidateListId, first require Eligibility.CanAssign(worker, route, X). Then obtain `workTime = X.GetWorkTime(worker)`; if `workTime <= 0`, reject X. Test X at every insertion position, including before the first and after the last existing step. Any layout whose newly required travel leg returns a negative duration is unreachable and is rejected. `CanAssign` does not replace execution-time or path-feasibility validation.
 
 route: A -\> B -\> C  
   
@@ -599,7 +592,7 @@ DeltaT = Travel(A.end, X.start)
 
 The implementation creates a new PlannedStep snapshot for X, replaces only the affected adjacent travel legs, updates EndPosition when necessary and updates aggregate TotalReward/WorkDuration/WalkingDuration/TotalDuration/Score from those local deltas. It then verifies full-route feasibility including reserved terminal travel to HorizonEndPosition. Unaffected step reward/work/travel snapshots are not defensively recomputed.
 
-For one helper iteration, evaluate every currently available candidate not already present in the route and keep its best feasible insertion layout. Among all such candidate/layout results, accept only the best route that **strictly beats** the current route according to `CompareRoutes`; positive Reward at zero marginal duration remains a strict improvement. Apply that assignment mutation inside the helper's operation context and repeat from the updated route. Stop when no ordinary candidate produces a strict improvement.
+For one helper iteration, evaluate every currently available positive-duration candidate not already present in the route and keep its best feasible insertion layout. Among all such candidate/layout results, accept only the best route that **strictly beats** the current route according to `CompareRoutes`. Apply that assignment mutation inside the helper's operation context and repeat from the updated route. Stop when no ordinary candidate produces a strict improvement.
 
 Conceptually:
 
@@ -790,32 +783,34 @@ receiverWorker
 receiverRoute  
 receiverInitialPosition  
 receiverStartTime  
-receiverHorizon // current-baseline preservation limit derived below\
+receiverHorizon // receiver-only current-baseline preservation limit derived below\
 receiverHorizonEndPosition  
   
 victimWorker  
 victimRoute // complete context-effective future route; contains no executing work  
 victimInitialPosition  
 victimStartTime  
-victimHorizon // current-baseline preservation limit derived below\
-victimHorizonEndPosition  
 
 Preconditions:
 
 - `receiverWorker != victimWorker`;
 - both supplied routes are current complete effective future routes in the supplied operation context;
-- both routes are already horizon-valid under their supplied fixed horizons;
-- the optimizer has no MaxTimeShift authority and cannot move either horizon.
+- receiverRoute is horizon-valid under its supplied fixed receiverHorizon;
+- victimRoute is a current legal complete effective route under its owning context's authoritative constraints;
+- the optimizer has no MaxTimeShift authority and cannot move receiverHorizon.
 
-For each route at the start of a `TrySteal` call, Work Planner derives the fixed preservation limit without reading or carrying an earlier operation's `UsedTimeShift` metadata:
+At the start of a `TrySteal` call, Work Planner derives the receiver-only fixed preservation limit without reading or carrying an earlier operation's `UsedTimeShift` metadata:
 
 ```text
-TryStealHorizon(route) = max(
+ReceiverStealHorizon(receiverRoute) = max(
     session BaseHorizon,
-    StartTime + RequiredElapsed(route, HorizonEndPosition))
+    receiverStartTime
+        + RequiredElapsed(receiverRoute, receiverHorizonEndPosition))
 ```
 
-The second term freezes the current effective route's already-authorized completion boundary; it does not grant new completion allowance. Its legality comes from the normal-session precondition for inherited routes or from the accepted operation that produced the current route, not from `TrySteal`. Receiver and victim variants must fit their independently frozen limits. Thus steal may reuse time saved by its own route rearrangement, but it cannot extend either route later than the boundary occupied by that route at call entry (or later than BaseHorizon when the entry route already fits the base). A later sequential steal call derives fresh preservation limits from the then-current effective routes; it still does not inherit operation-local shift metadata.
+The second term freezes the receiver route's already-authorized completion boundary; it does not grant new completion allowance. Its legality comes from the normal-session precondition for inherited routes or from the accepted operation that produced the current receiver route, not from `TrySteal`. A receiver variant must fit this frozen limit. Thus steal may reuse time saved by its own receiver-route rearrangement, but it cannot extend that route later than the boundary occupied at call entry (or later than BaseHorizon when the entry route already fits the base). A later sequential steal call derives a fresh receiver limit from the then-current effective receiver route; it still does not inherit operation-local shift metadata.
+
+No victim horizon is supplied or re-evaluated. Under the Section 3 fixed-topology minimum-travel contract and removal-safe stationary-WorkItem precondition, deleting X proves `RequiredElapsed(victimVariant) <= RequiredElapsed(victimRoute)`. Since the call-entry victim route is already legal under its authoritative owning-context constraints, every such removal preserves that legality without Route Planner reinterpreting the victim's higher-level horizon policy.
 
 Work Planner constructs the immediate-steal victim set from **non-empty** other-pawn routes whose assignments were reserved/unavailable to the receiver and that contain at least one v1 removal-safe step eligible for consideration. Route Planner does not discover victim membership itself. Transient empty/no-route states and routes with no removal-safe candidate are not victims. The event/integration layer guarantees through ColonyStateContext that executing work is absent and that each operation start context is current. How those guarantees and complete-route versions are represented is outside this document.
 
@@ -831,7 +826,7 @@ For each distinct transfer/replacement assignment state approved by CanSteal, cr
 
 For a pure transfer, remove X from the effective victim candidate and rebuild X as a full receiver step. Test every insertion position in receiverRoute. Keep only layouts where X fully completes and receiver terminal reachability remains inside `receiverHorizon`. The victim candidate is simply the route after removal of X; there is no automatic repair or augmentation.
 
-Under the Section 3 minimum-travel contract and its v1 removal-safe stationary-WorkItem precondition, removing X from an already-fitting victim route cannot increase required elapsed time merely because the stationary step disappeared. Therefore the resulting victim candidate remains within `victimHorizon`; no separate repair pass is required. A victim step that does not satisfy that precondition is not a valid v1 `TrySteal` candidate.
+Under the Section 3 minimum-travel contract and its v1 removal-safe stationary-WorkItem precondition, removing X from a current legal victim route cannot increase required elapsed time merely because the stationary step disappeared. Therefore the resulting victim candidate remains legal under the same authoritative constraints without receiving a victim horizon or a separate repair pass. A victim step that does not satisfy that precondition is not a valid v1 `TrySteal` candidate.
 
 ## 15.4 Replacement inside receiver
 
@@ -849,7 +844,7 @@ The comparison uses the complete context-effective receiver/victim pair and the 
 TrySteal(receiverRoute, victimRoute):
     require receiverWorker != victimWorker
     require FitsHorizon(receiverRoute, receiverHorizon, receiverHorizonEndPosition)
-    require FitsHorizon(victimRoute, victimHorizon, victimHorizonEndPosition)
+    require victimRoute is current and legal under its authoritative constraints
 
     operationContext = receiverRoute.ContextId
 
@@ -927,7 +922,7 @@ Work Planner may then continue another sequential steal attempt. Every subsequen
 
 - No anchor multi-start search.
 
-- Best-local uses at most two ordinary positive-work heuristic seeds plus one additional seed for every schedulable zero-work item; zero-work seed count may be capped later only if profiling demonstrates a concrete performance problem.
+- Best-local uses at most two positive-work heuristic seeds.
 
 - No beam search, 2-opt, swap or relocate cleanup inside ordinary route construction.
 
@@ -967,7 +962,7 @@ CompressRoute is intentionally simpler than ordinary exact RequiredJobs search: 
 
 - Construction request timestamps/horizons may be absolute; PlannedRoute stores local durations/snapshot metrics rather than cumulative absolute per-step timestamps.
 
-- Q(route) is the finite `TotalReward / max(TotalDuration, OnePlannerTimeQuantum)` rate; Q(empty) = 0. Provider durations are integral multiples of the canonical quantum, so only exactly zero duration uses the denominator floor. Positive Reward at zero marginal duration is a strict improvement, zero-duration regret arithmetic is finite, and IEEE infinity/NaN is never used. Generic alternative ordering is defined only by the canonical comparators in Section 4.1; higher-level callers may add policy-specific tie-breaks after an `Equivalent` result.
+- Every non-empty route supported by the current design has strictly positive TotalDuration and uses `Q(route) = TotalReward / TotalDuration`; Q(empty) = 0 is an explicit comparison-only convention. Zero-duration WorkItems/routes are outside the current planner contract and their scoring/comparison semantics are intentionally unresolved. Generic alternative ordering is defined only by the canonical comparators in Section 4.1; higher-level callers may add policy-specific tie-breaks after an `Equivalent` result.
 
 - Reserved terminal travel to HorizonEndPosition participates in fit checks but intentionally is excluded from route Q/WalkingDuration.
 
@@ -993,7 +988,7 @@ CompressRoute is intentionally simpler than ordinary exact RequiredJobs search: 
 
 - A MustRemainAssigned step may move atomically between affected routes but may not be dropped by that route-preserving operation. Such movement remains conditional on ordinary transfer eligibility and local Primary backing; “may move” is not a guarantee that every protected step is transferable from every route state.
 
-- Cross-route optimization never changes fixed horizons or creates partial work. Every stolen/replacement item is full execution in the receiving route.
+- Cross-route optimization never changes the receiver fixed horizon or creates partial work. Every stolen/replacement item is full execution in the receiving route. Victim removal preserves the current legal route under the removal-safe minimum-travel proof and therefore needs no victim horizon input.
 
 - Within a normal Work Planner planning session, `FinalGlobalCommit` is the Work-Planner-owned materialization boundary for session results. Route Planner works only inside the caller-supplied planning operation context, may create descendants below it, and before returning either leaves that context unchanged or merges its selected internal winner back into it. Route Planner itself never commits real `ColonyStateContext` ownership; event/integration-layer maintenance materialization remains outside this Route Planner contract.
 
@@ -1010,6 +1005,8 @@ CompressRoute is intentionally simpler than ordinary exact RequiredJobs search: 
 - Short-lived memoization within one planning event is allowed when profiling shows repeated candidates. Persistent arbitrary route-combination caching remains deferred.
 
 # 19. Open implementation questions
+
+- **Critical pre-implementation decision — zero-duration work.** Every non-empty route and every routable WorkItem in the current design has strictly positive work/total duration. Before implementation of the core planner/simulator begins, integration must either forbid/normalize zero-duration work before it reaches Route Planner, or the design must separately define zero-duration assignment, scoring, route/configuration comparison, anchor regret, RequiredJobs, steal and execution/immediate-replanning semantics. Until that decision is made, zero-duration WorkItems are invalid planner input; implementations must not silently invent a quantum/epsilon, use infinity/NaN, coerce zero to one tick or add local comparator exceptions.
 
 - Concrete C# shapes of IWorkItem, PlannedStep/PlannedRoute snapshot metrics, BuildRoute operation-result metadata, ITravelProvider and IRewardProvider, plus IAssignmentEligibilityProvider including transfer-aware CanSteal and the context-layer mechanism that keeps each unresolved pawn's HasPlannedPrimary/PrimaryCoverageRelaxed state consistent with Work Planner decisions and accepted assignment mutations. The concrete ColonyStateContext/PlanningContext representation, complete-route version/storage model, route-snapshot binding model, mutable-vs-immutable ContextId handling, copy/merge semantics, lifetime management, pooling/reference strategy, immutable ListId registry, winning-steal victim/receiver mutation representation and the mechanism by which later sequential-steal calls observe state released/consumed by earlier accepted steals are intentionally deferred to a dedicated context-layer design; this document specifies only the required planning semantics and isolation invariants. Temporary candidate/branch route snapshots are expected and need not imply that PlanningContext itself contains a route map.
 
@@ -1034,6 +1031,8 @@ CompressRoute is intentionally simpler than ordinary exact RequiredJobs search: 
 # 20. Settled v1 decisions / review guardrails
 
 The following are deliberate v1 decisions and should not be reopened in routine review without new evidence, a concrete failure mode or an implementation contradiction.
+
+- **Critical scope guardrail — zero-duration routes.** All algorithms, Q arithmetic, canonical comparators, RequiredJobs search, regret formulas, compression, steal and execution semantics currently specified in this document apply only to non-empty routes with `TotalDuration > 0` built from strictly positive-duration WorkItems. Routine review must not report missing zero-duration behavior as a contradiction inside that bounded scope or add a local quantum/infinity/epsilon workaround. This is nevertheless a hard blocker before core planner/simulator implementation: Section 19's integration prohibition/normalization versus separately designed zero-duration semantics decision must be resolved first.
 
 - Route Planner does not expose BuildPolicyRoute and does not interpret Primary/Backup. Caller candidate pools and eligibility enforce policy. `MaximizePartial` is a separate public normalization primitive and is never an implicit ExpandRoute phase. It never shrinks the existing partial budget; partial reduction belongs to CompressRoute.
 
@@ -1079,7 +1078,7 @@ The following are deliberate v1 decisions and should not be reopened in routine 
 
 - Known v1 limitation: repeated repair of an inherited-required recovery route may over-preserve an optionally added last Primary because generic eligibility does not store route provenance. This is intentionally accepted as a rare safe/suboptimal case. Review guardrail: MustRemainAssigned allows a protected step to move atomically only when ordinary CanSteal/local-backing rules permit the resulting state; wording that a selected/protected anchor “may move” is intentionally conditional and does not promise universal transferability.
 
-- Immediate-steal victim membership is a Work Planner assignment-visibility decision: Route Planner only receives a specific non-empty other-pawn victim with at least one removal-safe candidate step. `receiverWorker == victimWorker` is invalid. ColonyStateContext/ancestor effective routes can be victims when their assignments were reserved/unavailable to the receiver; unresolved speculative sibling alternatives and transient empty/no-route states are not victims. Work Planner derives each call's receiver/victim preservation horizon from the greater of BaseHorizon and that route's current absolute required end, with no cap inferred from unused MaxTimeShift. This freezes an already-authorized baseline boundary without carrying earlier operation result metadata or granting new shift.
+- Immediate-steal victim membership is a Work Planner assignment-visibility decision: Route Planner only receives a specific non-empty other-pawn victim with at least one removal-safe candidate step. `receiverWorker == victimWorker` is invalid. ColonyStateContext/ancestor effective routes can be victims when their assignments were reserved/unavailable to the receiver; unresolved speculative sibling alternatives and transient empty/no-route states are not victims. Work Planner derives each call's receiver-only preservation horizon from the greater of BaseHorizon and the receiver route's current absolute required end, with no cap inferred from unused MaxTimeShift. This freezes an already-authorized receiver baseline without carrying earlier operation result metadata or granting new shift. No victim horizon is supplied: current victim legality plus the removal-safe minimum-travel proof guarantees that deleting a candidate step cannot increase RequiredElapsed.
 
 - Execution-boundary guardrail: do not reintroduce an executing/locked prefix inside `PlannedRoute`. Executing work is outside the route but remains assigned/reserved and absent from the effective unassigned pool, normal CandidateLists and steal victims until the event/integration layer explicitly completes, releases or invalidates that ownership. Route Planner receives only the still-planned route plus its already-correct start context; the future event/execution integration design owns the concrete reservation/transition mechanics.
 
