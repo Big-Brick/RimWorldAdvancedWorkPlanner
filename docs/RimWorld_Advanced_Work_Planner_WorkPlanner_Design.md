@@ -2,7 +2,7 @@
 
 Colony-level policy, orchestration, route ownership and planning coordination
 
-**Current agreed concept:** v0.43 • 18 September 2026  
+**Current agreed concept:** v0.44 • 18 September 2026\
 **Project:** RimWorld Advanced Work Planner  
 **Root namespace:** `RimWorldAdvancedWorkPlanner`  
 **Document purpose:** Conceptual specification of colony work-planning policy and orchestration before implementation.  
@@ -73,20 +73,20 @@ tau_p(B) = pawn-specific travel-equivalent time for B normal traversable cells
 R_completion,pj = V_intrinsic,pj \* tau_p(B) when the current WorkItem is fully completed  
 R_full,pj = R_work,pj + R_completion,pj
 
-For skill-sensitive work, q_pj is a job-family-specific expected-result factor rather than a generic Skill/BestSkill ratio. Quality distributions, botch/fail chance, yield, food poisoning, medical result, resource waste and similar effects require their own expected-outcome models. V_intrinsic,pj is the pawn effective continuous value rate used to convert the spatial completion allowance into Reward. This makes B cells mean the same scheduling tradeoff across pawns with different work speeds/expected results: a completion bonus offsets approximately B cells worth of that pawn's own foregone intrinsic work value. For work families where a speed multiplier is not meaningful, including instantaneous actions, use the family-appropriate neutral/effective speed factor (normally 1) rather than deriving the bonus by dividing Reward by zero duration.
+For skill-sensitive work, q_pj is a job-family-specific expected-result factor rather than a generic Skill/BestSkill ratio. Quality distributions, botch/fail chance, yield, food poisoning, medical result, resource waste and similar effects require their own expected-outcome models. V_intrinsic,pj is the pawn effective continuous value rate used to convert the spatial completion allowance into Reward. This makes B cells mean the same scheduling tradeoff across pawns with different work speeds/expected results: a completion bonus offsets approximately B cells worth of that pawn's own foregone intrinsic work value. Work families without a meaningful positive planning duration, including instantaneous actions, remain outside the current planner contract pending the critical pre-implementation decision in Sections 20–21.
 
 | **Reference-result baseline —** q = 1 is defined relative to the pawn with the best relevant skill in the colony. Temporary unavailability does not change that baseline. |
 |---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 
-For speed-only work, q_pj = 1. tau_p(B) is derived from the pawn movement cost/speed for approximately B normal traversable cells, not from the actual A\* path to the candidate work item; actual detour cost is still represented by ITravelProvider in route elapsed time. For intuition, B = 10 cells roughly compensates an out-and-back detour of about 5 cells from an already useful route, although real route geometry may differ. Instantaneous work has T_j^0 = 0 and therefore no continuous-work term, but it can still receive finite completion Reward through V_intrinsic,pj \* tau_p(B). The Route Planner receives the resulting Reward values from IRewardProvider and returns Q(route) in Reward/s.
+For speed-only work, q_pj = 1. tau_p(B) is derived from the pawn movement cost/speed for approximately B normal traversable cells, not from the actual A\* path to the candidate work item; actual detour cost is still represented by ITravelProvider in route elapsed time. For intuition, B = 10 cells roughly compensates an out-and-back detour of about 5 cells from an already useful route, although real route geometry may differ. The Route Planner receives the resulting Reward values from IRewardProvider and returns Q(route) in Reward/s for supported positive-duration routes.
 
-Partial Reward is supplied separately by IRewardProvider using an absolute workDuration rather than a semantic completion percentage or a stored fraction of some earlier full-work time. Each work family maps that duration for the concrete pawn to whatever durable progress and Reward actually result, which need not be linear. A partial execution that remains incomplete receives no completion-travel bonus. Work Planner does not choose partial planning duration; it consumes the route/result produced by Route Planner. GetWorkTime(pawn) = 0 is valid for instantaneous work such as switch-like actions; such work is full-or-not-executed and is never partial. If an instantaneous positive-Reward job also has zero travel from the current route position, adding it is a strict zero-time improvement; after a route containing only such immediate work finishes, normal planning can run again immediately.
+Partial Reward is supplied separately by IRewardProvider using an absolute positive workDuration rather than a semantic completion percentage or a stored fraction of some earlier full-work time. Each supported work family maps that duration for the concrete pawn to whatever durable progress and Reward actually result, which need not be linear. A partial execution that remains incomplete receives no completion-travel bonus. Work Planner does not choose partial planning duration; it consumes the route/result produced by Route Planner.
 
 Colony-level configurations use the same route-rate unit:  
   
 Q(configuration) = sum over planned pawns of Q(route_p)  
   
-This additive configuration score is also used by two-route steal/replacement. Concrete route and affected-pair ordering is defined by the Route Planner canonical `CompareRoutes` / `CompareRoutePairs` contracts and the Work Planner policy comparators in Section 6.4 rather than restated here. The still-open zero-duration-route case must receive an explicit finite comparison rule before implementation.
+This additive configuration score is also used by two-route steal/replacement. Concrete route and affected-pair ordering is defined by the Route Planner canonical `CompareRoutes` / `CompareRoutePairs` contracts and the Work Planner policy comparators in Section 6.4 rather than restated here. Every non-empty route covered by the current design has `TotalDuration > 0` and uses the ordinary `Q = TotalReward / TotalDuration`; zero-duration route/configuration and regret semantics are outside the current contract pending the critical pre-implementation decision in Sections 20–21.
 
 # 4. Route Planner service boundary
 
@@ -326,7 +326,7 @@ BuildPolicyRoute is a Work-Planner-only construct-or-augment helper.
 
 **Ordinary mode — `requiredItems = {}`.**
 
-If the pawn has no route, use the existing Primary-first BuildRoute pipeline: Primary BuildRoute first. A partial created by that BuildRoute has already received the enclosing operation's maximum-feasible partial treatment; a following Backup `ExpandRoute` does **not** by itself trigger another `MaximizePartial`. If no Primary route can be constructed, coordinated planning marks relaxation as appropriate and Backup becomes the fallback BuildRoute pool.
+If the pawn has no route, use the existing Primary-first BuildRoute pipeline: Primary BuildRoute first. When that Primary BuildRoute succeeds, its non-empty result becomes the baseline for one ordinary Backup `ExpandRoute(required = {})`; this following Backup stage has zero positive-shift authority and does not by itself trigger `MaximizePartial`. (Ordinary no-required Primary BuildRoute cannot create a partial, but the no-extra-normalization rule remains the common public-operation boundary rule.) If no Primary route can be constructed, coordinated planning marks relaxation as appropriate and Backup instead becomes the fallback BuildRoute pool. A failed fallback leaves the pawn at ordinary NoRoute/Idle. Therefore Backup augments a successfully constructed Primary-backed route and acts as the sequential from-scratch fallback only when Primary construction fails; these are not competing numeric alternatives.
 
 If the pawn already has a route, BuildPolicyRoute operates from the normalized-baseline child prepared once for this set of alternatives before candidate branching, and first inspects that complete normalized route's `HasPlannedPrimary` state:
 
@@ -580,7 +580,20 @@ Choose the winning anchor-targeted candidate context, destroy all competing cand
 
 Before a winning pawn-decision child context is merged/promoted into its Work-Planner parent for the first time, Work Planner runs one sequential immediate-steal pass for that pawn's complete effective route. This applies regardless of whether the winning decision created a route from scratch, augmented an existing route or left an existing non-empty route otherwise unchanged. Route Planner internal branch merges are exempt and never trigger this boundary.
 
-The victim set is every route owned by another pawn whose assignments are authoritative/reserved in the effective parent state and therefore unavailable to the receiver. ColonyStateContext routes and accepted ancestor-context routes can be victims; unresolved speculative sibling alternatives cannot. Receiver and victim must be different pawns.
+The victim set is every **non-empty** route owned by another pawn whose assignments are authoritative/reserved in the effective parent state and therefore unavailable to the receiver, provided that route contains at least one v1 removal-safe step eligible for consideration. ColonyStateContext routes and accepted ancestor-context routes can be victims; unresolved speculative sibling alternatives, transient empty routes and NoRoute states cannot. Receiver and victim must be different pawns.
+
+For every `TrySteal` call, Work Planner derives only the receiver's fixed preservation horizon from the call-entry effective receiver route rather than carrying an earlier operation's used-shift result:
+
+```text
+ReceiverStealHorizon(receiverRoute) = max(
+    session BaseHorizon,
+    receiverStartTime + receiverRoute.TotalDuration
+        + TerminalTravel(receiverRoute, receiverHorizonEndPosition))
+```
+
+The formula freezes the boundary already occupied by the current legal receiver route, including a receiver normalized with positive shift, without converting unused MaxTimeShift into generic steal budget. A receiver variant may reuse time saved by its own rearrangement but must fit that frozen boundary. Each later sequential victim call derives a fresh receiver limit from the then-current effective receiver route and does not read an earlier operation's `UsedTimeShift` metadata.
+
+Work Planner supplies no victim horizon. Each victim is already a current legal complete effective route under its owning context's authoritative constraints. Under the fixed-topology minimum-travel contract and removal-safe stationary-WorkItem precondition, removing the stolen step cannot increase the victim's `RequiredElapsed`; the resulting victim route therefore preserves that existing legality without Work Planner or Route Planner reinterpreting its horizon policy.
 
 Work Planner visits eligible victims once in one stable deterministic route/list order. That order carries no policy priority and v1 does not optimize it, but the greedy result may depend on it because every accepted steal changes the effective baseline seen by later victims. For each victim Work Planner calls Route Planner `TrySteal` directly against the still-live winning decision context. TrySteal performs only transfer/replacement of planned assigned work; it does not repair the victim or consume additional unassigned work. If an improvement wins, Route Planner merges it back into the supplied winning context, and the next victim sees that updated effective state. There is no comparison of different victims from a common baseline, no victim-order permutation search and no repeat-to-convergence pass.
 
@@ -643,11 +656,11 @@ An empty PlannedRoute is a transient planning result only. ColonyStateContext do
 
 # 12. Cross-route optimization boundary
 
-Route Planner owns the generic mechanics of moving one already-assigned victim item into a receiver route, optionally releasing one unprotected receiver item, and comparing the complete affected pair. Work Planner supplies the two complete effective routes and independently calculated fixed horizon constraints for that `TrySteal` call.
+Route Planner owns the generic mechanics of moving one already-assigned victim item into a receiver route, optionally releasing one unprotected receiver item, and comparing the complete affected pair. Work Planner supplies the two complete effective routes, the receiver's independently calculated fixed preservation horizon, and the invariant that the victim route is current and legal under its authoritative owning-context constraints.
 
 Cross-route optimization performs **no victim repair or post-steal augmentation**. It does not call ExpandRoute, does not consume additional unassigned work and does not attempt to place a released receiver replacement into the victim. A released receiver item simply becomes unassigned in the tentative branch context. Any later augmentation/normalization is a separate explicit Work-Planner orchestration decision using the public Route Planner primitives.
 
-Every stolen item is replanned as full execution in the receiver. Cross-route optimization has no partial fallback and no MaxTimeShift authority. The victim route supplied to TrySteal must already fit its fixed victim horizon. v1 `TrySteal` may remove only WorkItems satisfying the Route Planner Section 3 removal-safe stationary precondition; under that precondition and the fixed-topology/minimum-travel contract, removing such a victim step preserves victim horizon feasibility.
+Every stolen item is replanned as full execution in the receiver. Cross-route optimization has no partial fallback and no MaxTimeShift authority. v1 `TrySteal` may remove only WorkItems satisfying the Route Planner Section 3 removal-safe stationary precondition; under that precondition and the fixed-topology/minimum-travel contract, removing such a victim step cannot increase RequiredElapsed and therefore preserves the current legal victim route without a victim horizon input.
 
 CanSteal validates the atomic transfer/replacement state, including hard ownership/capability rules, MustRemainAssigned constraints and local Primary backing. Because the stolen item was already assigned and absent from the unassigned pool, the transfer itself does not run the ordinary global matching check used by CanAssign. A receiver replacement may release work into the effective unassigned pool; later operations that consume such work pass normal CanAssign coverage checks in the then-current context.
 
@@ -776,7 +789,7 @@ v1 should not maintain a persistent cache of arbitrary checked job combinations.
 
 - UI Priority is the base continuous-work Reward/s; CompletionTravelBonusCells is the separate completion-bias setting. Priority expresses value, not urgency.
 
-- Q(route) is Reward/s. Positive Reward at zero marginal elapsed time is a strict improvement. Concrete route/candidate comparison ordering is centralized in the Route Planner `CompareRoutes` contract and Work Planner Section 6.4 rather than restated by individual algorithms.
+- Every non-empty route supported by the current design has strictly positive TotalDuration and uses `Q(route) = TotalReward / TotalDuration`; Q(empty) = 0 is an explicit comparison-only convention. Zero-duration WorkItems/routes and their configuration/regret semantics are outside the current planner contract. Concrete route/candidate comparison ordering is centralized in the Route Planner `CompareRoutes` contract and Work Planner Section 6.4 rather than restated by individual algorithms.
 
 - Assigned/reserved ownership is broader than PlannedRoute membership. Planned assigned work is represented by PlannedSteps and may participate in route-preserving redistribution; executing reservations are assigned but outside PlannedRoute, outside the effective unassigned pool and unavailable to Primary free-work matching, normal candidate snapshots and TrySteal until the event/integration layer releases/completes/invalidates them.
 
@@ -837,6 +850,8 @@ v1 should not maintain a persistent cache of arbitrary checked job combinations.
 
 # 20. Open design questions
 
+- **Critical pre-implementation decision — zero-duration work.** Every non-empty route and every routable WorkItem in the current design has strictly positive work/total duration. Before implementation of the core planner/simulator begins, integration must either forbid/normalize zero-duration work before it reaches Work/Route Planner, or the design must separately define zero-duration assignment, reward/scoring, route/configuration comparison, anchor regret, RequiredJobs, steal and execution/immediate-replanning semantics. Until that decision is made, zero-duration WorkItems are invalid planner input and implementations must not invent local zero-duration behavior.
+
 - Concrete expected-result functions q for each skill-sensitive RimWorld work family.
 
 - Work-item clustering model and mapping of cluster progress back to Reward.
@@ -848,8 +863,6 @@ v1 should not maintain a persistent cache of arbitrary checked job combinations.
 - Profiling threshold for caching/reusing Primary matching results beyond the v1 reverse-index/context fast paths in IAssignmentEligibilityProvider.
 
 - Performance budget and profiling thresholds for travel-cache size, route memoization and matching recomputation.
-
-- If an all-zero-duration positive-Reward route must participate directly in regret arithmetic, use an explicit finite implementation encoding/special comparison path rather than IEEE infinity; ordinary route improvement is already defined because positive Reward at zero marginal elapsed time is a strict improvement, and immediate zero-time work can execute before an immediate replanning event.
 
 - Concrete event-to-maintenance mapping for RimWorld state changes that affect route cached metrics or validity; architecture is event-driven, but the exact event set belongs to integration design.
 
@@ -864,6 +877,8 @@ v1 should not maintain a persistent cache of arbitrary checked job combinations.
 # 21. Settled v1 decisions / review guardrails
 
 The following points are deliberate v1 decisions. Routine design review should not reopen them without new gameplay evidence, an implementation contradiction or a concrete failure mode.
+
+- **Critical scope guardrail — zero-duration routes.** All Work Planner policy, configuration scoring, anchor regret, temporal orchestration, steal coordination and related invariants currently specified in this document apply only to non-empty routes with `TotalDuration > 0` built from strictly positive-duration WorkItems. Routine review must not report missing zero-duration behavior as a contradiction inside that bounded scope or add a local workaround. This is nevertheless a hard blocker before core planner/simulator implementation: Section 20's integration prohibition/normalization versus separately designed zero-duration semantics decision must be resolved first.
 
 - Inherited-required rebuild is recovery and does not require Primary backing. Primary augmentation remains Q-improvement-only and is attempted before Backup.
 
@@ -922,7 +937,7 @@ The following points are deliberate v1 decisions. Routine design review should n
 - Work Planner must not duplicate Route Planner internal algorithms. It documents invocation conditions, policy-correct inputs, operation outcomes and higher-level handling only. It may rely on Route Planner result metadata and restate externally observable facts only when Work Planner itself branches on them; detailed route-search/compression mechanics remain authoritative exclusively in the Route Planner design.
 
 
-- Immediate-steal victim membership is defined by assignment visibility in the parent/effective state: consider every **other-pawn** route whose assignments were reserved/unavailable to the selected receiver. ColonyStateContext and accepted ancestor routes can be victims; unresolved speculative sibling alternatives are not authoritative victims. `receiverWorker == victimWorker` is invalid.
+- Immediate-steal victim membership is defined by assignment visibility in the parent/effective state: consider every **non-empty other-pawn** route whose assignments were reserved/unavailable to the selected receiver and that contains at least one v1 removal-safe candidate step. ColonyStateContext and accepted ancestor routes can be victims; unresolved speculative sibling alternatives and transient empty/no-route states are not authoritative victims. `receiverWorker == victimWorker` is invalid. For each call, derive only the receiver's fixed preservation horizon as the greater of BaseHorizon and the receiver route's current absolute required end, without adding unused MaxTimeShift; this freezes an already-authorized receiver baseline without carrying prior used-shift metadata or granting generic shift budget. No victim horizon is supplied: current victim legality plus the removal-safe minimum-travel proof guarantees that deleting a candidate step cannot increase RequiredElapsed.
 
 - Execution-boundary guardrail: never represent currently executing work as a leading/locked step inside PlannedRoute merely to support steal or horizon calculations. Executing work is outside the route but remains assigned/reserved and unavailable to the effective unassigned pool, Primary matching, normal candidate snapshots and `TrySteal`. The event/execution integration layer supplies the already-correct route-start context: when execution precedes the still-planned route, `RouteStartTime`/`InitialPosition` already predict the end time/result position of that executing work. The concrete reservation/transition mechanics are intentionally not mirrored here.
 
