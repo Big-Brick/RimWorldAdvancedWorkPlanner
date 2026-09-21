@@ -374,7 +374,7 @@ For every finding include:
 2. **Concrete sections in both documents**
 3. **Concrete scenario**
 4. **Why it is a problem**
-5. **Minimal recommended design change**
+5. **Patch to fix it**
 
 Also include:
 
